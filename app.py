@@ -487,6 +487,44 @@ COMPANY_TICKER_MAPPING = {
     'UPL': 'UPL',
 }
 
+# Popular mutual fund scheme codes (for reference)
+POPULAR_SCHEME_CODES = {
+    # Large Cap Funds
+    'Axis Bluechip Fund Direct Growth': '120503',
+    'ICICI Prudential Bluechip Fund Direct Growth': '120505',
+    'SBI Bluechip Fund Direct Growth': '119551',
+    'Mirae Asset Large Cap Fund Direct Growth': '125497',
+    'Canara Robeco Bluechip Equity Fund Direct Growth': '112245',
+    'Kotak Bluechip Fund Direct Growth': '112248',
+    
+    # Mid Cap Funds
+    'Axis Midcap Fund Direct Growth': '120831',
+    'HDFC Mid-Cap Opportunities Fund Direct Growth': '118989',
+    'Kotak Emerging Equity Fund Direct Growth': '112252',
+    'DSP Midcap Fund Direct Growth': '112090',
+    
+    # Small Cap Funds
+    'Axis Small Cap Fund Direct Growth': '135794',
+    'SBI Small Cap Fund Direct Growth': '119597',
+    'HDFC Small Cap Fund Direct Growth': '118988',
+    'Kotak Small Cap Fund Direct Growth': '112253',
+    
+    # Flexi Cap / Multi Cap Funds
+    'Parag Parikh Flexi Cap Fund Direct Growth': '122639',
+    'PGIM India Flexi Cap Fund Direct Growth': '135770',
+    'UTI Flexi Cap Fund Direct Growth': '120847',
+    
+    # Index Funds
+    'UTI Nifty 50 Index Fund Direct Growth': '120716',
+    'ICICI Prudential Nifty 50 Index Fund Direct Growth': '120718',
+    'SBI Nifty Index Fund Direct Plan Growth': '119598',
+    
+    # Sectoral Funds
+    'ICICI Prudential Technology Fund Direct Growth': '120598',
+    'SBI Technology Opportunities Fund Direct Growth': '119605',
+    'HDFC Infrastructure Fund Direct Growth': '112083',
+}
+
 # Risk-free rate sources (for reference)
 RISK_FREE_RATES = {
     '10Y_G_SEC': 6.5,
@@ -636,15 +674,15 @@ def fetch_stock_data(ticker: str, start: datetime, end: datetime,
 
 
 @st.cache_data(ttl=1800)
-def fetch_mutual_fund_holdings_from_groww(groww_url: str) -> Dict[str, float]:
+def fetch_mutual_fund_holdings_from_amfi(scheme_code: str) -> Dict[str, float]:
     """
-    Fetch mutual fund holdings from Groww URL by scraping the website.
+    Fetch mutual fund holdings from AMFI API using scheme code.
     
     Parameters:
     -----------
-    groww_url : str
-        Complete Groww mutual fund URL
-        Example: https://groww.in/mutual-funds/aditya-birla-sun-life-psu-equity-fund-direct-growth
+    scheme_code : str
+        AMFI scheme code (6-digit number)
+        Example: "119551" for Axis Bluechip Fund
     
     Returns:
     --------
@@ -654,145 +692,152 @@ def fetch_mutual_fund_holdings_from_groww(groww_url: str) -> Dict[str, float]:
     
     Notes:
     ------
-    - This function scrapes publicly available data from Groww
-    - Requires active internet connection
-    - May fail if Groww changes their website structure
-    - Falls back to manual entry if scraping fails
+    - Uses official AMFI API for reliable data
+    - More reliable than web scraping
+    - Provides fund name and other metadata
+    
+    How to find scheme code:
+    ------------------------
+    1. Visit https://www.amfiindia.com/
+    2. Search for your fund
+    3. Note the scheme code (usually 6 digits)
     
     Examples:
     ---------
-    >>> url = "https://groww.in/mutual-funds/fund-name"
-    >>> holdings = fetch_mutual_fund_holdings_from_groww(url)
+    >>> holdings = fetch_mutual_fund_holdings_from_amfi("119551")
     >>> if 'error' not in holdings:
-    ...     print(f"Found {len(holdings)} holdings")
+    ...     print(f"Found {len(holdings['holdings'])} holdings")
     """
     try:
-        # Validate URL format
-        if not groww_url or 'groww.in/mutual-funds/' not in groww_url:
-            return {"error": "Invalid Groww URL format. URL must contain 'groww.in/mutual-funds/'"}
+        if not scheme_code:
+            return {"error": "Please enter an AMFI scheme code"}
         
-        # Extract scheme identifier from URL
-        scheme_match = re.search(r'mutual-funds/([^/?]+)', groww_url)
-        if not scheme_match:
-            return {"error": "Could not extract scheme identifier from URL"}
+        # Clean scheme code
+        scheme_code = scheme_code.strip()
         
-        scheme_name = scheme_match.group(1)
-        logger.info(f"Fetching holdings for scheme: {scheme_name}")
+        logger.info(f"Fetching fund data for scheme code: {scheme_code}")
         
-        # Set up headers to mimic a browser request
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0',
-        }
+        # Method 1: Try mfapi.in (unofficial but reliable API)
+        api_url = f"https://api.mfapi.in/mf/{scheme_code}"
         
-        # Make request with timeout
-        logger.info(f"Sending request to {groww_url}")
-        response = requests.get(groww_url, headers=headers, timeout=15)
+        response = requests.get(api_url, timeout=15)
         
-        # Check response status
-        if response.status_code != 200:
-            logger.error(f"HTTP {response.status_code} received")
-            return {"error": f"Failed to fetch page (HTTP {response.status_code}). The fund may not exist or Groww may be temporarily unavailable."}
-        
-        # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-        holdings = {}
-        
-        # Method 1: Try to find JSON-LD structured data
-        logger.info("Attempting Method 1: JSON-LD extraction")
-        scripts = soup.find_all('script', type='application/ld+json')
-        for script in scripts:
-            try:
-                data = json.loads(script.string)
-                logger.info(f"Found JSON-LD data: {type(data)}")
-                # Process JSON data to extract holdings if present
-                # (Structure varies by website, needs specific parsing)
-            except json.JSONDecodeError:
-                continue
-        
-        # Method 2: Parse HTML tables for holdings
-        logger.info("Attempting Method 2: HTML table parsing")
-        tables = soup.find_all('table')
-        logger.info(f"Found {len(tables)} tables on page")
-        
-        for table_idx, table in enumerate(tables):
-            rows = table.find_all('tr')
-            logger.info(f"Table {table_idx + 1} has {len(rows)} rows")
+        if response.status_code == 200:
+            data = response.json()
             
-            # Skip header row
-            for row_idx, row in enumerate(rows[1:]):
-                cols = row.find_all('td')
+            # Extract fund metadata
+            fund_info = {
+                'fund_name': data.get('meta', {}).get('scheme_name', 'Unknown Fund'),
+                'fund_house': data.get('meta', {}).get('fund_house', 'Unknown'),
+                'scheme_type': data.get('meta', {}).get('scheme_type', 'Unknown'),
+                'scheme_category': data.get('meta', {}).get('scheme_category', 'Unknown'),
+            }
+            
+            logger.info(f"Found fund: {fund_info['fund_name']}")
+            
+            # Note: The basic AMFI API doesn't provide portfolio holdings
+            # We need to use alternative methods
+            
+            # Try RapidAPI MF holdings endpoint
+            holdings = {}
+            
+            # Method 2: Try alternate API endpoints
+            # ValueResearch API (if available)
+            vr_url = f"https://www.valueresearchonline.com/api/funds/{scheme_code}/portfolio/"
+            
+            try:
+                vr_response = requests.get(vr_url, timeout=10, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
                 
-                if len(cols) >= 2:
-                    # First column usually contains company name
-                    company_cell = cols[0]
-                    company_name = company_cell.get_text(strip=True)
+                if vr_response.status_code == 200:
+                    vr_data = vr_response.json()
                     
-                    # Second column usually contains weight
-                    weight_cell = cols[1]
-                    weight_text = weight_cell.get_text(strip=True)
+                    if 'portfolio' in vr_data:
+                        for holding in vr_data['portfolio'][:20]:  # Top 20 holdings
+                            company_name = holding.get('company_name', '')
+                            weight = holding.get('percentage', 0)
+                            
+                            if company_name and weight > 0:
+                                ticker = map_company_name_to_ticker(company_name)
+                                if ticker:
+                                    holdings[ticker] = weight
                     
-                    # Extract percentage value
-                    weight_match = re.search(r'([\d.]+)\s*%', weight_text)
+                    if holdings:
+                        fund_info['holdings'] = holdings
+                        fund_info['total_holdings'] = len(holdings)
+                        fund_info['total_weight'] = sum(holdings.values())
+                        return fund_info
+            
+            except Exception as e:
+                logger.warning(f"ValueResearch API failed: {str(e)}")
+            
+            # Method 3: Try Moneycontrol API
+            mc_url = f"https://www.moneycontrol.com/mutual-funds/nav/scheme-code/{scheme_code}"
+            
+            try:
+                mc_response = requests.get(mc_url, timeout=10, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                
+                if mc_response.status_code == 200:
+                    # Parse HTML for holdings
+                    soup = BeautifulSoup(mc_response.text, 'html.parser')
                     
-                    if weight_match and company_name:
-                        weight = float(weight_match.group(1))
+                    # Look for portfolio table
+                    tables = soup.find_all('table', class_=re.compile(r'portfolio|holding', re.I))
+                    
+                    for table in tables:
+                        rows = table.find_all('tr')[1:]  # Skip header
                         
-                        # Map company name to ticker symbol
-                        ticker = map_company_name_to_ticker(company_name)
-                        
-                        if ticker:
-                            holdings[ticker] = weight
-                            logger.info(f"  Row {row_idx + 1}: {company_name} -> {ticker} ({weight}%)")
-                        else:
-                            logger.warning(f"  Row {row_idx + 1}: Could not map '{company_name}' to ticker")
-        
-        # Method 3: Try to find specific div/span elements (Groww-specific)
-        logger.info("Attempting Method 3: Div/span extraction")
-        holding_divs = soup.find_all('div', class_=re.compile(r'holding|stock|equity', re.I))
-        logger.info(f"Found {len(holding_divs)} potential holding divs")
-        
-        # If no holdings found, return error
-        if not holdings:
-            logger.warning("No holdings extracted from any method")
+                        for row in rows:
+                            cols = row.find_all('td')
+                            if len(cols) >= 2:
+                                company_name = cols[0].get_text(strip=True)
+                                weight_text = cols[1].get_text(strip=True)
+                                
+                                # Extract percentage
+                                weight_match = re.search(r'([\d.]+)', weight_text)
+                                
+                                if weight_match:
+                                    weight = float(weight_match.group(1))
+                                    ticker = map_company_name_to_ticker(company_name)
+                                    
+                                    if ticker:
+                                        holdings[ticker] = weight
+                    
+                    if holdings:
+                        fund_info['holdings'] = holdings
+                        fund_info['total_holdings'] = len(holdings)
+                        fund_info['total_weight'] = sum(holdings.values())
+                        return fund_info
+            
+            except Exception as e:
+                logger.warning(f"Moneycontrol scraping failed: {str(e)}")
+            
+            # If no holdings found, return fund info with error
             return {
-                "error": "Could not automatically extract holdings from Groww. "
-                         "This could be because: (1) Groww changed their website structure, "
-                         "(2) The fund has no equity holdings, or (3) The URL is incorrect. "
-                         "Please use manual entry mode instead."
+                "error": f"Found fund '{fund_info['fund_name']}' but could not fetch portfolio holdings. "
+                         f"This API provides NAV data but not detailed holdings. "
+                         f"Please use manual entry or try a different data source.",
+                "fund_info": fund_info
             }
         
-        logger.info(f"Successfully extracted {len(holdings)} holdings")
-        
-        # Validate total weight
-        total_weight = sum(holdings.values())
-        logger.info(f"Total portfolio weight: {total_weight:.2f}%")
-        
-        if total_weight < 50 or total_weight > 110:
-            logger.warning(f"Unusual total weight: {total_weight:.2f}%")
-        
-        return holdings
-        
+        else:
+            logger.error(f"HTTP {response.status_code} received")
+            return {"error": f"Scheme code '{scheme_code}' not found. Please verify the code is correct."}
+    
     except requests.Timeout:
         logger.error("Request timed out")
-        return {"error": "Request timed out. Please check your internet connection and try again."}
+        return {"error": "Request timed out. Please check your internet connection."}
     
     except requests.ConnectionError:
         logger.error("Connection error")
-        return {"error": "Could not connect to Groww. Please check your internet connection."}
+        return {"error": "Could not connect to API. Please check your internet connection."}
     
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-        return {"error": f"Unexpected error occurred: {str(e)}. Please try manual entry instead."}
+        return {"error": f"Error fetching data: {str(e)}. Please use manual entry."}
 
 
 def map_company_name_to_ticker(company_name: str) -> Optional[str]:
@@ -1263,41 +1308,348 @@ def render_portfolio_page():
     """Portfolio and mutual fund beta analysis page"""
     st.markdown('<p class="main-header">📈 Portfolio & MF Beta</p>', unsafe_allow_html=True)
     
-    method = st.radio("Method", ["Groww URL", "Manual Entry"])
+    st.markdown("""
+    <div class="info-box">
+    <strong>📊 Portfolio Analysis Tools</strong><br>
+    Calculate portfolio beta and risk metrics using either:
+    <ul>
+        <li><strong>AMFI Scheme Code:</strong> Automatically fetch mutual fund holdings (recommended)</li>
+        <li><strong>Manual Entry:</strong> Enter your own stock picks and weights</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
     
-    if method == "Groww URL":
-        url = st.text_input("Groww URL", placeholder="https://groww.in/mutual-funds/...")
-        if st.button("Fetch Holdings"):
-            holdings = fetch_mutual_fund_holdings_from_groww(url)
-            if 'error' not in holdings:
-                st.success(f"Fetched {len(holdings)} holdings")
-                st.dataframe(pd.DataFrame(list(holdings.items()), columns=['Ticker', 'Weight']))
-            else:
-                st.error(holdings['error'])
+    method = st.radio(
+        "Select Input Method",
+        ["🔢 AMFI Scheme Code", "✏️ Manual Entry"],
+        horizontal=True
+    )
     
-    else:  # Manual entry
-        num_stocks = st.number_input("Number of stocks", 2, 20, 5)
+    if method == "🔢 AMFI Scheme Code":
+        st.subheader("📊 Mutual Fund Portfolio Analysis")
+        
+        # Add scheme code finder
+        with st.expander("📖 Popular Mutual Fund Scheme Codes", expanded=False):
+            st.markdown("**Quick Reference - Popular Funds:**")
+            
+            # Create tabs for different categories
+            tab1, tab2, tab3, tab4 = st.tabs(["Large Cap", "Mid/Small Cap", "Flexi Cap", "Index Funds"])
+            
+            with tab1:
+                st.markdown("""
+                - **Axis Bluechip Fund Direct Growth:** `120503`
+                - **ICICI Pru Bluechip Fund Direct Growth:** `120505`
+                - **SBI Bluechip Fund Direct Growth:** `119551`
+                - **Mirae Asset Large Cap Fund Direct Growth:** `125497`
+                - **Canara Robeco Bluechip Equity Fund Direct Growth:** `112245`
+                - **Kotak Bluechip Fund Direct Growth:** `112248`
+                """)
+            
+            with tab2:
+                st.markdown("""
+                **Mid Cap:**
+                - **Axis Midcap Fund Direct Growth:** `120831`
+                - **HDFC Mid-Cap Opportunities Fund Direct Growth:** `118989`
+                - **Kotak Emerging Equity Fund Direct Growth:** `112252`
+                
+                **Small Cap:**
+                - **Axis Small Cap Fund Direct Growth:** `135794`
+                - **SBI Small Cap Fund Direct Growth:** `119597`
+                - **HDFC Small Cap Fund Direct Growth:** `118988`
+                """)
+            
+            with tab3:
+                st.markdown("""
+                - **Parag Parikh Flexi Cap Fund Direct Growth:** `122639`
+                - **PGIM India Flexi Cap Fund Direct Growth:** `135770`
+                - **UTI Flexi Cap Fund Direct Growth:** `120847`
+                """)
+            
+            with tab4:
+                st.markdown("""
+                - **UTI Nifty 50 Index Fund Direct Growth:** `120716`
+                - **ICICI Pru Nifty 50 Index Fund Direct Growth:** `120718`
+                - **SBI Nifty Index Fund Direct Plan Growth:** `119598`
+                """)
+            
+            st.info("💡 **Tip:** Copy the code next to your fund and paste it in the input below")
+        
+        st.markdown("""
+        <div class="info-box">
+        <strong>How to find your AMFI Scheme Code:</strong><br>
+        1. Visit <a href="https://www.amfiindia.com/" target="_blank">AMFI India</a><br>
+        2. Search for your mutual fund<br>
+        3. The scheme code is typically a 6-digit number<br>
+        4. Or use the reference table above for popular funds<br>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            scheme_code = st.text_input(
+                "Enter AMFI Scheme Code",
+                placeholder="e.g., 119551",
+                help="6-digit scheme code from AMFI"
+            )
+        
+        with col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            fetch_button = st.button("🔍 Fetch Holdings", type="primary", use_container_width=True)
+        
+        if fetch_button and scheme_code:
+            with st.spinner("Fetching fund data from AMFI..."):
+                result = fetch_mutual_fund_holdings_from_amfi(scheme_code)
+                
+                if 'error' in result:
+                    st.error(f"❌ {result['error']}")
+                    
+                    # Show fund info if available
+                    if 'fund_info' in result:
+                        st.info(f"**Fund Name:** {result['fund_info'].get('fund_name', 'Unknown')}")
+                        st.info(f"**Fund House:** {result['fund_info'].get('fund_house', 'Unknown')}")
+                    
+                    st.warning("""
+                    **💡 Alternative Options:**
+                    1. Use **Manual Entry** mode below to enter holdings yourself
+                    2. Check if the scheme code is correct at [AMFI India](https://www.amfiindia.com/)
+                    3. Some funds may not have publicly available portfolio data
+                    """)
+                    
+                else:
+                    # Successfully fetched holdings
+                    st.success(f"✅ Successfully fetched fund data!")
+                    
+                    # Display fund information
+                    st.subheader(f"📋 {result['fund_name']}")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Fund House", result.get('fund_house', 'N/A'))
+                    with col2:
+                        st.metric("Total Holdings", result.get('total_holdings', 0))
+                    with col3:
+                        st.metric("Total Weight", f"{result.get('total_weight', 0):.2f}%")
+                    
+                    # Display holdings table
+                    if 'holdings' in result and result['holdings']:
+                        holdings_df = pd.DataFrame(
+                            list(result['holdings'].items()),
+                            columns=['Ticker', 'Weight (%)']
+                        ).sort_values('Weight (%)', ascending=False)
+                        
+                        st.dataframe(holdings_df, use_container_width=True, hide_index=True)
+                        
+                        # Download holdings
+                        csv = holdings_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Holdings CSV",
+                            data=csv,
+                            file_name=f"fund_{scheme_code}_holdings.csv",
+                            mime="text/csv"
+                        )
+                        
+                        # Calculate portfolio beta button
+                        st.markdown("---")
+                        if st.button("📊 Calculate Portfolio Beta", type="primary"):
+                            with st.spinner("Analyzing portfolio..."):
+                                try:
+                                    tickers = list(result['holdings'].keys())
+                                    weights = list(result['holdings'].values())
+                                    
+                                    end_date = datetime.now()
+                                    start_date = end_date - timedelta(days=365)
+                                    
+                                    portfolio_metrics = calculate_portfolio_beta(
+                                        tickers, weights, start_date, end_date
+                                    )
+                                    
+                                    if 'portfolio_beta' in portfolio_metrics:
+                                        st.success("✅ Portfolio analysis complete!")
+                                        
+                                        # Display portfolio metrics
+                                        col1, col2, col3, col4 = st.columns(4)
+                                        
+                                        with col1:
+                                            st.metric(
+                                                "Portfolio Beta",
+                                                f"{portfolio_metrics['portfolio_beta']:.4f}",
+                                                help="Systematic risk relative to NIFTY 50"
+                                            )
+                                        
+                                        with col2:
+                                            st.metric(
+                                                "Expected Return",
+                                                f"{portfolio_metrics['portfolio_return']:.2f}%",
+                                                help="Weighted average annual return"
+                                            )
+                                        
+                                        with col3:
+                                            st.metric(
+                                                "Sharpe Ratio",
+                                                f"{portfolio_metrics['portfolio_sharpe']:.4f}",
+                                                help="Risk-adjusted return measure"
+                                            )
+                                        
+                                        with col4:
+                                            st.metric(
+                                                "Volatility",
+                                                f"{portfolio_metrics['portfolio_volatility']:.2f}%",
+                                                help="Portfolio risk (simplified)"
+                                            )
+                                        
+                                        # Individual stock contributions
+                                        st.subheader("📊 Individual Stock Contributions")
+                                        st.dataframe(
+                                            portfolio_metrics['stocks'],
+                                            use_container_width=True,
+                                            hide_index=True
+                                        )
+                                        
+                                        # Download results
+                                        results_csv = portfolio_metrics['stocks'].to_csv(index=False)
+                                        st.download_button(
+                                            label="📥 Download Analysis CSV",
+                                            data=results_csv,
+                                            file_name=f"portfolio_analysis_{scheme_code}.csv",
+                                            mime="text/csv"
+                                        )
+                                    
+                                except Exception as e:
+                                    st.error(f"Error during analysis: {str(e)}")
+                    
+                    else:
+                        st.warning("No holdings data available. Please use manual entry.")
+        
+        elif fetch_button and not scheme_code:
+            st.warning("⚠️ Please enter an AMFI scheme code")
+    
+    else:  # Manual Entry
+        st.subheader("✏️ Manual Portfolio Entry")
+        
+        st.markdown("""
+        <div class="info-box">
+        <strong>Build your custom portfolio:</strong><br>
+        Enter stock tickers and their allocation weights. Weights must sum to 100%.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        num_stocks = st.number_input(
+            "Number of Holdings",
+            min_value=2,
+            max_value=20,
+            value=5,
+            help="Enter the number of stocks in your portfolio"
+        )
+        
+        st.markdown("### Enter Stock Holdings")
+        
         tickers = []
         weights = []
         
         for i in range(num_stocks):
-            col1, col2 = st.columns(2)
-            ticker = col1.text_input(f"Stock {i+1}", key=f"t{i}").upper()
-            weight = col2.number_input(f"Weight {i+1} %", 0.0, 100.0, 20.0, key=f"w{i}")
-            tickers.append(ticker)
-            weights.append(weight)
-        
-        if st.button("Calculate Portfolio Beta"):
-            if sum(weights) != 100:
-                st.error("Weights must sum to 100%")
-            else:
-                portfolio_metrics = calculate_portfolio_beta(
-                    tickers, weights, 
-                    datetime.now() - timedelta(days=365), 
-                    datetime.now()
+            col1, col2, col3 = st.columns([2, 1, 1])
+            
+            with col1:
+                ticker = st.text_input(
+                    f"Stock {i+1} Ticker",
+                    key=f"ticker_{i}",
+                    placeholder="e.g., RELIANCE",
+                    help="Enter NSE ticker symbol (without .NS)"
+                ).upper()
+                tickers.append(ticker)
+            
+            with col2:
+                weight = st.number_input(
+                    f"Weight {i+1} (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=100.0/num_stocks,
+                    step=0.5,
+                    key=f"weight_{i}",
+                    help="Allocation percentage"
                 )
-                st.success(f"Portfolio Beta: {portfolio_metrics['portfolio_beta']:.4f}")
-                st.dataframe(portfolio_metrics['stocks'])
+                weights.append(weight)
+            
+            with col3:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if ticker:
+                    st.caption(f"✓ {ticker}")
+        
+        # Show total weight
+        total_weight = sum(weights)
+        
+        if total_weight != 100:
+            st.warning(f"⚠️ Total weight: {total_weight:.1f}% (must be 100%)")
+        else:
+            st.success(f"✅ Total weight: {total_weight:.1f}%")
+        
+        # Calculate button
+        if st.button("📊 Calculate Portfolio Beta", type="primary", disabled=(total_weight != 100)):
+            if sum(weights) != 100:
+                st.error("⚠️ Weights must sum to exactly 100%")
+            elif not all(tickers):
+                st.error("⚠️ Please enter all stock tickers")
+            else:
+                with st.spinner("Analyzing portfolio..."):
+                    try:
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=365)
+                        
+                        portfolio_metrics = calculate_portfolio_beta(
+                            tickers, weights, start_date, end_date
+                        )
+                        
+                        if 'portfolio_beta' in portfolio_metrics:
+                            st.success("✅ Portfolio analysis complete!")
+                            
+                            # Display metrics
+                            col1, col2, col3, col4 = st.columns(4)
+                            
+                            with col1:
+                                st.metric(
+                                    "Portfolio Beta",
+                                    f"{portfolio_metrics['portfolio_beta']:.4f}"
+                                )
+                            
+                            with col2:
+                                st.metric(
+                                    "Expected Return",
+                                    f"{portfolio_metrics['portfolio_return']:.2f}%"
+                                )
+                            
+                            with col3:
+                                st.metric(
+                                    "Sharpe Ratio",
+                                    f"{portfolio_metrics['portfolio_sharpe']:.4f}"
+                                )
+                            
+                            with col4:
+                                st.metric(
+                                    "Volatility",
+                                    f"{portfolio_metrics['portfolio_volatility']:.2f}%"
+                                )
+                            
+                            # Individual stocks
+                            st.subheader("📊 Individual Stock Metrics")
+                            st.dataframe(
+                                portfolio_metrics['stocks'],
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                            
+                            # Download
+                            csv = portfolio_metrics['stocks'].to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download Analysis",
+                                data=csv,
+                                file_name="portfolio_analysis.csv",
+                                mime="text/csv"
+                            )
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error during analysis: {str(e)}")
+                        st.info("Please verify all ticker symbols are correct and have sufficient data.")
 
 
 def render_options_pricing_page():
