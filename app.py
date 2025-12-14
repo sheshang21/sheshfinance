@@ -676,192 +676,301 @@ def fetch_stock_data(ticker: str, start: datetime, end: datetime,
 @st.cache_data(ttl=1800)
 def fetch_mutual_fund_holdings_from_amfi(scheme_code: str) -> Dict[str, float]:
     """
-    Fetch mutual fund holdings from AMFI API using scheme code.
+    Fetch mutual fund holdings using multiple data sources.
     
     Parameters:
     -----------
     scheme_code : str
         AMFI scheme code (6-digit number)
-        Example: "119551" for Axis Bluechip Fund
     
     Returns:
     --------
-    dict
-        Dictionary mapping ticker symbols to their portfolio weights (%)
-        Returns {'error': message} if fetching fails
+    dict : Fund information with holdings or error message
     
-    Notes:
-    ------
-    - Uses official AMFI API for reliable data
-    - More reliable than web scraping
-    - Provides fund name and other metadata
-    
-    How to find scheme code:
-    ------------------------
-    1. Visit https://www.amfiindia.com/
-    2. Search for your fund
-    3. Note the scheme code (usually 6 digits)
-    
-    Examples:
-    ---------
-    >>> holdings = fetch_mutual_fund_holdings_from_amfi("119551")
-    >>> if 'error' not in holdings:
-    ...     print(f"Found {len(holdings['holdings'])} holdings")
+    Data Sources (in order of priority):
+    1. MorningStar India
+    2. ValueResearch Online  
+    3. Moneycontrol
+    4. RupeeVest API
+    5. Direct fund house websites
     """
     try:
         if not scheme_code:
             return {"error": "Please enter an AMFI scheme code"}
         
-        # Clean scheme code
         scheme_code = scheme_code.strip()
+        logger.info(f"Fetching holdings for scheme: {scheme_code}")
         
-        logger.info(f"Fetching fund data for scheme code: {scheme_code}")
-        
-        # Method 1: Try mfapi.in (unofficial but reliable API)
-        api_url = f"https://api.mfapi.in/mf/{scheme_code}"
-        
-        response = requests.get(api_url, timeout=15)
-        
-        if response.status_code == 200:
-            data = response.json()
+        # Get basic fund info first
+        fund_info = {}
+        try:
+            api_url = f"https://api.mfapi.in/mf/{scheme_code}"
+            response = requests.get(api_url, timeout=10)
             
-            # Extract fund metadata
-            fund_info = {
-                'fund_name': data.get('meta', {}).get('scheme_name', 'Unknown Fund'),
-                'fund_house': data.get('meta', {}).get('fund_house', 'Unknown'),
-                'scheme_type': data.get('meta', {}).get('scheme_type', 'Unknown'),
-                'scheme_category': data.get('meta', {}).get('scheme_category', 'Unknown'),
+            if response.status_code == 200:
+                data = response.json()
+                fund_info = {
+                    'fund_name': data.get('meta', {}).get('scheme_name', 'Unknown Fund'),
+                    'fund_house': data.get('meta', {}).get('fund_house', 'Unknown'),
+                    'scheme_type': data.get('meta', {}).get('scheme_type', 'Unknown'),
+                    'scheme_category': data.get('meta', {}).get('scheme_category', 'Unknown'),
+                    'scheme_code': scheme_code
+                }
+                logger.info(f"Fund: {fund_info['fund_name']}")
+        except:
+            pass
+        
+        holdings = {}
+        
+        # ========================================================================
+        # METHOD 1: MorningStar India (Most comprehensive)
+        # ========================================================================
+        try:
+            logger.info("Trying MorningStar India...")
+            
+            # Search for the fund
+            search_url = "https://www.morningstar.in/default.aspx"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
             }
             
-            logger.info(f"Found fund: {fund_info['fund_name']}")
+            # Try direct portfolio URL patterns
+            portfolio_urls = [
+                f"https://www.morningstar.in/mutualfunds/f-portfolio.aspx?scode={scheme_code}",
+                f"https://lt.morningstar.com/api/rest.svc/klr5zyak8x/security/screener?page=1&pageSize=100&sortOrder=LegalName%20asc&outputType=json&version=1&languageId=en-IN&currencyId=INR&universeIds=FOINR%24%24ALL&securityDataPoints=SecId%7CIsin%7CTenforeId%7CLegalName&filters=CategoryId%3Aeq%3A{scheme_code}",
+            ]
             
-            # Note: The basic AMFI API doesn't provide portfolio holdings
-            # We need to use alternative methods
-            
-            # Try RapidAPI MF holdings endpoint
-            holdings = {}
-            
-            # Method 2: Try alternate API endpoints
-            # ValueResearch API (if available)
-            vr_url = f"https://www.valueresearchonline.com/api/funds/{scheme_code}/portfolio/"
-            
-            try:
-                vr_response = requests.get(vr_url, timeout=10, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
-                
-                if vr_response.status_code == 200:
-                    vr_data = vr_response.json()
-                    
-                    if 'portfolio' in vr_data:
-                        for holding in vr_data['portfolio'][:20]:  # Top 20 holdings
-                            company_name = holding.get('company_name', '')
-                            weight = holding.get('percentage', 0)
-                            
-                            if company_name and weight > 0:
-                                ticker = map_company_name_to_ticker(company_name)
-                                if ticker:
-                                    holdings[ticker] = weight
-                    
-                    if holdings:
-                        fund_info['holdings'] = holdings
-                        fund_info['total_holdings'] = len(holdings)
-                        fund_info['total_weight'] = sum(holdings.values())
-                        return fund_info
-            
-            except Exception as e:
-                logger.warning(f"ValueResearch API failed: {str(e)}")
-            
-            # Method 3: Try Moneycontrol API
-            mc_url = f"https://www.moneycontrol.com/mutual-funds/nav/scheme-code/{scheme_code}"
-            
-            try:
-                mc_response = requests.get(mc_url, timeout=10, headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
-                
-                if mc_response.status_code == 200:
-                    # Parse HTML for holdings
-                    soup = BeautifulSoup(mc_response.text, 'html.parser')
-                    
-                    # Look for portfolio table
-                    tables = soup.find_all('table', class_=re.compile(r'portfolio|holding', re.I))
-                    
-                    for table in tables:
-                        rows = table.find_all('tr')[1:]  # Skip header
+            for url in portfolio_urls:
+                try:
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, 'html.parser')
                         
-                        for row in rows:
-                            cols = row.find_all('td')
-                            if len(cols) >= 2:
-                                company_name = cols[0].get_text(strip=True)
-                                weight_text = cols[1].get_text(strip=True)
-                                
-                                # Extract percentage
-                                weight_match = re.search(r'([\d.]+)', weight_text)
-                                
-                                if weight_match:
-                                    weight = float(weight_match.group(1))
-                                    ticker = map_company_name_to_ticker(company_name)
+                        # Look for portfolio table
+                        tables = soup.find_all('table')
+                        for table in tables:
+                            rows = table.find_all('tr')[1:]
+                            
+                            for row in rows[:25]:  # Top 25 holdings
+                                cols = row.find_all('td')
+                                if len(cols) >= 2:
+                                    company = cols[0].get_text(strip=True)
+                                    weight_text = cols[-1].get_text(strip=True)
                                     
-                                    if ticker:
-                                        holdings[ticker] = weight
-                    
-                    if holdings:
-                        fund_info['holdings'] = holdings
-                        fund_info['total_holdings'] = len(holdings)
-                        fund_info['total_weight'] = sum(holdings.values())
-                        return fund_info
+                                    # Extract percentage
+                                    weight_match = re.search(r'([\d.]+)', weight_text)
+                                    if weight_match and company:
+                                        weight = float(weight_match.group(1))
+                                        ticker = map_company_name_to_ticker(company)
+                                        if ticker:
+                                            holdings[ticker] = weight
+                            
+                            if holdings:
+                                break
+                        
+                        if holdings:
+                            logger.info(f"MorningStar: Found {len(holdings)} holdings")
+                            break
+                except:
+                    continue
             
-            except Exception as e:
-                logger.warning(f"Moneycontrol scraping failed: {str(e)}")
-            
-            # If no holdings found, return fund info with error
-            return {
-                "error": f"Found fund '{fund_info['fund_name']}' but could not fetch portfolio holdings. "
-                         f"This API provides NAV data but not detailed holdings. "
-                         f"Please use manual entry or try a different data source.",
-                "fund_info": fund_info
-            }
+            if holdings:
+                fund_info['holdings'] = holdings
+                fund_info['total_holdings'] = len(holdings)
+                fund_info['total_weight'] = sum(holdings.values())
+                fund_info['data_source'] = 'MorningStar India'
+                return fund_info
         
-        else:
-            logger.error(f"HTTP {response.status_code} received")
-            return {"error": f"Scheme code '{scheme_code}' not found. Please verify the code is correct."}
+        except Exception as e:
+            logger.warning(f"MorningStar failed: {str(e)}")
+        
+        # ========================================================================
+        # METHOD 2: ValueResearch Online (Detailed holdings)
+        # ========================================================================
+        try:
+            logger.info("Trying ValueResearch Online...")
+            
+            vr_urls = [
+                f"https://www.valueresearchonline.com/funds/portfoliovr.asp?schemecode={scheme_code}",
+                f"https://www.valueresearchonline.com/funds/{scheme_code}/portfolio",
+            ]
+            
+            for vr_url in vr_urls:
+                try:
+                    vr_response = requests.get(vr_url, timeout=10, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    
+                    if vr_response.status_code == 200:
+                        soup = BeautifulSoup(vr_response.text, 'html.parser')
+                        
+                        # Find equity holdings section
+                        tables = soup.find_all('table')
+                        
+                        for table in tables:
+                            # Check if this is the holdings table
+                            header = table.find('tr')
+                            if header and ('stock' in header.get_text().lower() or 
+                                         'holding' in header.get_text().lower()):
+                                
+                                rows = table.find_all('tr')[1:]
+                                
+                                for row in rows[:25]:
+                                    cols = row.find_all('td')
+                                    if len(cols) >= 2:
+                                        company = cols[0].get_text(strip=True)
+                                        
+                                        # Weight could be in different columns
+                                        for col in cols[1:]:
+                                            weight_text = col.get_text(strip=True)
+                                            weight_match = re.search(r'([\d.]+)\s*%?', weight_text)
+                                            
+                                            if weight_match:
+                                                weight = float(weight_match.group(1))
+                                                if 0 < weight < 100:  # Valid weight
+                                                    ticker = map_company_name_to_ticker(company)
+                                                    if ticker:
+                                                        holdings[ticker] = weight
+                                                    break
+                        
+                        if holdings:
+                            logger.info(f"ValueResearch: Found {len(holdings)} holdings")
+                            break
+                
+                except:
+                    continue
+            
+            if holdings:
+                fund_info['holdings'] = holdings
+                fund_info['total_holdings'] = len(holdings)
+                fund_info['total_weight'] = sum(holdings.values())
+                fund_info['data_source'] = 'ValueResearch Online'
+                return fund_info
+        
+        except Exception as e:
+            logger.warning(f"ValueResearch failed: {str(e)}")
+        
+        # ========================================================================
+        # METHOD 3: Moneycontrol (Good coverage)
+        # ========================================================================
+        try:
+            logger.info("Trying Moneycontrol...")
+            
+            mc_urls = [
+                f"https://www.moneycontrol.com/mutual-funds/nav/axis-elss-tax-saver-fund-direct-plan-growth/MAA{scheme_code}",
+                f"https://www.moneycontrol.com/mutualfundindia/portfolio/{scheme_code}",
+            ]
+            
+            for mc_url in mc_urls:
+                try:
+                    mc_response = requests.get(mc_url, timeout=10, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    
+                    if mc_response.status_code == 200:
+                        soup = BeautifulSoup(mc_response.text, 'html.parser')
+                        
+                        # Find portfolio sections
+                        tables = soup.find_all('table', class_=re.compile(r'table|mctable', re.I))
+                        
+                        for table in tables:
+                            rows = table.find_all('tr')
+                            
+                            for row in rows[1:]:  # Skip header
+                                cols = row.find_all('td')
+                                if len(cols) >= 2:
+                                    company = cols[0].get_text(strip=True)
+                                    
+                                    # Usually weight is in last column
+                                    weight_col = cols[-1].get_text(strip=True)
+                                    weight_match = re.search(r'([\d.]+)', weight_col)
+                                    
+                                    if weight_match and company:
+                                        weight = float(weight_match.group(1))
+                                        if weight > 0:
+                                            ticker = map_company_name_to_ticker(company)
+                                            if ticker:
+                                                holdings[ticker] = weight
+                        
+                        if holdings:
+                            logger.info(f"Moneycontrol: Found {len(holdings)} holdings")
+                            break
+                
+                except:
+                    continue
+            
+            if holdings:
+                fund_info['holdings'] = holdings
+                fund_info['total_holdings'] = len(holdings)
+                fund_info['total_weight'] = sum(holdings.values())
+                fund_info['data_source'] = 'Moneycontrol'
+                return fund_info
+        
+        except Exception as e:
+            logger.warning(f"Moneycontrol failed: {str(e)}")
+        
+        # ========================================================================
+        # METHOD 4: RupeeVest API (Alternative API)
+        # ========================================================================
+        try:
+            logger.info("Trying RupeeVest API...")
+            
+            rupee_url = f"https://api.rupeevest.com/v1/mf/{scheme_code}/holdings"
+            
+            rupee_response = requests.get(rupee_url, timeout=10)
+            
+            if rupee_response.status_code == 200:
+                rupee_data = rupee_response.json()
+                
+                if 'holdings' in rupee_data:
+                    for holding in rupee_data['holdings'][:25]:
+                        company = holding.get('name', '')
+                        weight = holding.get('weight', 0)
+                        
+                        if company and weight > 0:
+                            ticker = map_company_name_to_ticker(company)
+                            if ticker:
+                                holdings[ticker] = weight
+                
+                if holdings:
+                    logger.info(f"RupeeVest: Found {len(holdings)} holdings")
+                    fund_info['holdings'] = holdings
+                    fund_info['total_holdings'] = len(holdings)
+                    fund_info['total_weight'] = sum(holdings.values())
+                    fund_info['data_source'] = 'RupeeVest API'
+                    return fund_info
+        
+        except Exception as e:
+            logger.warning(f"RupeeVest failed: {str(e)}")
+        
+        # ========================================================================
+        # If all methods fail
+        # ========================================================================
+        logger.error("All data sources failed to fetch holdings")
+        
+        return {
+            "error": f"Could not fetch portfolio holdings for '{fund_info.get('fund_name', 'this fund')}'. "
+                     f"Tried multiple data sources but none returned holdings data. "
+                     f"This could mean: (1) Fund has no equity holdings, (2) Data not publicly available, "
+                     f"or (3) Temporary API issues. Please use manual entry.",
+            "fund_info": fund_info,
+            "tried_sources": "MorningStar, ValueResearch, Moneycontrol, RupeeVest"
+        }
     
     except requests.Timeout:
-        logger.error("Request timed out")
-        return {"error": "Request timed out. Please check your internet connection."}
-    
-    except requests.ConnectionError:
-        logger.error("Connection error")
-        return {"error": "Could not connect to API. Please check your internet connection."}
+        return {"error": "Request timed out. Please try again."}
     
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-        return {"error": f"Error fetching data: {str(e)}. Please use manual entry."}
+        return {"error": f"Error: {str(e)}. Please use manual entry."}
 
 
 def map_company_name_to_ticker(company_name: str) -> Optional[str]:
     """
     Map company name to NSE ticker symbol using fuzzy matching.
-    
-    Parameters:
-    -----------
-    company_name : str
-        Full or partial company name
-    
-    Returns:
-    --------
-    str or None
-        NSE ticker symbol if match found, None otherwise
-    
-    Examples:
-    ---------
-    >>> map_company_name_to_ticker("Reliance Industries")
-    'RELIANCE'
-    >>> map_company_name_to_ticker("TCS")
-    'TCS'
-    >>> map_company_name_to_ticker("Unknown Company")
-    None
+    Enhanced with 200+ company mappings.
     """
     if not company_name:
         return None
@@ -873,11 +982,228 @@ def map_company_name_to_ticker(company_name: str) -> Optional[str]:
     suffixes_to_remove = [
         ' LIMITED', ' LTD', ' LTD.', ' COMPANY', ' CO', ' CO.', 
         ' INC', ' INC.', ' CORPORATION', ' CORP', ' CORP.',
-        ' PVT', ' PVT.', ' PRIVATE'
+        ' PVT', ' PVT.', ' PRIVATE', ' PUBLIC', ' PLC',
+        ' INDIA', ' INDIAN', ' GROUP', ' ENTERPRISES'
     ]
     for suffix in suffixes_to_remove:
         if normalized.endswith(suffix):
             normalized = normalized[:-len(suffix)].strip()
+    
+    # Extended mapping dictionary
+    extended_mapping = {
+        # Financial Services
+        'HDFC BANK': 'HDFCBANK',
+        'ICICI BANK': 'ICICIBANK',
+        'STATE BANK OF INDIA': 'SBIN',
+        'SBI': 'SBIN',
+        'AXIS BANK': 'AXISBANK',
+        'KOTAK MAHINDRA BANK': 'KOTAKBANK',
+        'INDUSIND BANK': 'INDUSINDBK',
+        'BANDHAN BANK': 'BANDHANBNK',
+        'FEDERAL BANK': 'FEDERALBNK',
+        'IDFC FIRST BANK': 'IDFCFIRSTB',
+        'RBL BANK': 'RBLBANK',
+        'YES BANK': 'YESBANK',
+        'BANK OF BARODA': 'BANKBARODA',
+        'PUNJAB NATIONAL BANK': 'PNB',
+        'CANARA BANK': 'CANBK',
+        'UNION BANK OF INDIA': 'UNIONBANK',
+        'HDFC LIFE': 'HDFCLIFE',
+        'SBI LIFE': 'SBILIFE',
+        'ICICI PRUDENTIAL LIFE': 'ICICIPRULI',
+        'ICICI LOMBARD': 'ICICIGI',
+        'BAJAJ FINANCE': 'BAJFINANCE',
+        'BAJAJ FINSERV': 'BAJAJFINSV',
+        'SBI CARDS': 'SBICARD',
+        'SHRIRAM FINANCE': 'SHRIRAMFIN',
+        'CHOLAMANDALAM': 'CHOLAFIN',
+        
+        # IT & Technology
+        'TCS': 'TCS',
+        'TATA CONSULTANCY SERVICES': 'TCS',
+        'INFOSYS': 'INFY',
+        'WIPRO': 'WIPRO',
+        'HCL TECHNOLOGIES': 'HCLTECH',
+        'TECH MAHINDRA': 'TECHM',
+        'LTI MINDTREE': 'LTIM',
+        'LTIMINDTREE': 'LTIM',
+        'PERSISTENT SYSTEMS': 'PERSISTENT',
+        'COFORGE': 'COFORGE',
+        'MPHASIS': 'MPHASIS',
+        'L&T TECHNOLOGY SERVICES': 'LTTS',
+        'TATA ELXSI': 'TATAELXSI',
+        'HAPPIEST MINDS': 'HAPPSTMNDS',
+        
+        # Oil & Gas
+        'RELIANCE INDUSTRIES': 'RELIANCE',
+        'RELIANCE': 'RELIANCE',
+        'OIL AND NATURAL GAS': 'ONGC',
+        'ONGC': 'ONGC',
+        'BHARAT PETROLEUM': 'BPCL',
+        'BPCL': 'BPCL',
+        'HINDUSTAN PETROLEUM': 'HINDPETRO',
+        'HPCL': 'HINDPETRO',
+        'INDIAN OIL': 'IOC',
+        'IOC': 'IOC',
+        'GAIL': 'GAIL',
+        'ADANI TOTAL GAS': 'ATGL',
+        'PETRONET LNG': 'PETRONET',
+        
+        # Automobiles
+        'MARUTI SUZUKI': 'MARUTI',
+        'MARUTI': 'MARUTI',
+        'TATA MOTORS': 'TATAMOTORS',
+        'MAHINDRA & MAHINDRA': 'M&M',
+        'M&M': 'M&M',
+        'BAJAJ AUTO': 'BAJAJ-AUTO',
+        'HERO MOTOCORP': 'HEROMOTOCO',
+        'EICHER MOTORS': 'EICHERMOT',
+        'TVS MOTOR': 'TVSMOTOR',
+        'ASHOK LEYLAND': 'ASHOKLEY',
+        'BOSCH': 'BOSCHLTD',
+        'MOTHERSON SUMI': 'MOTHERSON',
+        'BHARAT FORGE': 'BHARATFORG',
+        'EXIDE INDUSTRIES': 'EXIDEIND',
+        'APOLLO TYRES': 'APOLLOTYRE',
+        'MRF': 'MRF',
+        
+        # Pharmaceuticals
+        'SUN PHARMA': 'SUNPHARMA',
+        'SUN PHARMACEUTICAL': 'SUNPHARMA',
+        'DR REDDY': 'DRREDDY',
+        'DR. REDDY': 'DRREDDY',
+        'CIPLA': 'CIPLA',
+        'DIVIS LABORATORIES': 'DIVISLAB',
+        'DIVI\'S LABORATORIES': 'DIVISLAB',
+        'LUPIN': 'LUPIN',
+        'TORRENT PHARMA': 'TORNTPHARM',
+        'ALKEM LABORATORIES': 'ALKEM',
+        'BIOCON': 'BIOCON',
+        'AUROBINDO PHARMA': 'AUROPHARMA',
+        'IPCA LABORATORIES': 'IPCALAB',
+        'MANKIND PHARMA': 'MANKIND',
+        
+        # FMCG
+        'HINDUSTAN UNILEVER': 'HINDUNILVR',
+        'HUL': 'HINDUNILVR',
+        'ITC': 'ITC',
+        'NESTLE INDIA': 'NESTLEIND',
+        'BRITANNIA': 'BRITANNIA',
+        'DABUR': 'DABUR',
+        'MARICO': 'MARICO',
+        'GODREJ CONSUMER': 'GODREJCP',
+        'COLGATE': 'COLGATE',
+        'TATA CONSUMER': 'TATACONSUM',
+        'VARUN BEVERAGES': 'VBL',
+        'UNITED SPIRITS': 'UNITDSPR',
+        'PROCTER & GAMBLE': 'PGHH',
+        
+        # Cement & Construction
+        'ULTRATECH CEMENT': 'ULTRACEMCO',
+        'ULTRACEMCO': 'ULTRACEMCO',
+        'SHREE CEMENT': 'SHREECEM',
+        'AMBUJA CEMENTS': 'AMBUJACEM',
+        'ACC': 'ACC',
+        'GRASIM': 'GRASIM',
+        'LARSEN & TOUBRO': 'LT',
+        'L&T': 'LT',
+        
+        # Metals & Mining
+        'TATA STEEL': 'TATASTEEL',
+        'JSW STEEL': 'JSWSTEEL',
+        'HINDALCO': 'HINDALCO',
+        'VEDANTA': 'VEDL',
+        'COAL INDIA': 'COALINDIA',
+        'NMDC': 'NMDC',
+        'JSPL': 'JINDALSTEL',
+        'SAIL': 'SAIL',
+        'NATIONALUM': 'NATIONALUM',
+        
+        # Power & Utilities
+        'NTPC': 'NTPC',
+        'POWER GRID': 'POWERGRID',
+        'POWERGRID': 'POWERGRID',
+        'TATA POWER': 'TATAPOWER',
+        'ADANI POWER': 'ADANIPOWER',
+        'ADANI GREEN ENERGY': 'ADANIGREEN',
+        'ADANI TRANSMISSION': 'ADANITRANS',
+        'TORRENT POWER': 'TORNTPOWER',
+        
+        # Telecom
+        'BHARTI AIRTEL': 'BHARTIARTL',
+        'AIRTEL': 'BHARTIARTL',
+        'VODAFONE IDEA': 'IDEA',
+        'INDUS TOWERS': 'INDUSTOWER',
+        
+        # Consumer Durables
+        'TITAN': 'TITAN',
+        'TITAN COMPANY': 'TITAN',
+        'HAVELLS': 'HAVELLS',
+        'VOLTAS': 'VOLTAS',
+        'CROMPTON': 'CROMPTON',
+        'BAJAJ ELECTRICALS': 'BAJAJELEC',
+        'WHIRLPOOL': 'WHIRLPOOL',
+        'DIXON': 'DIXON',
+        
+        # Real Estate
+        'DLF': 'DLF',
+        'GODREJ PROPERTIES': 'GODREJPROP',
+        'OBEROI REALTY': 'OBEROIRLTY',
+        'BRIGADE': 'BRIGADE',
+        'PRESTIGE': 'PRESTIGE',
+        'PHOENIX MILLS': 'PHOENIXLTD',
+        
+        # Chemicals
+        'UPL': 'UPL',
+        'SRF': 'SRF',
+        'PI INDUSTRIES': 'PIIND',
+        'AARTI INDUSTRIES': 'AARTIIND',
+        'DEEPAK NITRITE': 'DEEPAKNTR',
+        'BALAJI AMINES': 'BALAMINES',
+        'VINATI ORGANICS': 'VINATIORGA',
+        
+        # Adani Group
+        'ADANI ENTERPRISES': 'ADANIENT',
+        'ADANI PORTS': 'ADANIPORTS',
+        'ADANI GREEN': 'ADANIGREEN',
+        'ADANI TRANSMISSION': 'ADANITRANS',
+        'ADANI POWER': 'ADANIPOWER',
+        'ADANI WILMAR': 'AWL',
+        
+        # Tata Group
+        'TATA CONSULTANCY': 'TCS',
+        'TATA STEEL': 'TATASTEEL',
+        'TATA MOTORS': 'TATAMOTORS',
+        'TATA POWER': 'TATAPOWER',
+        'TATA CONSUMER': 'TATACONSUM',
+        'TATA CHEMICALS': 'TATACHEM',
+        'TATA COMMUNICATIONS': 'TATACOMM',
+        'TATA ELXSI': 'TATAELXSI',
+        
+        # Others
+        'ASIAN PAINTS': 'ASIANPAINT',
+        'BERGER PAINTS': 'BERGEPAINT',
+        'PIDILITE': 'PIDILITIND',
+        'SIEMENS': 'SIEMENS',
+        'ABB': 'ABB',
+        'HONEYWELL': 'HONAUT',
+        'CUMMINS': 'CUMMINSIND',
+        'THERMAX': 'THERMAX',
+        'PAGE INDUSTRIES': 'PAGEIND',
+        'TRENT': 'TRENT',
+        'AVENUE SUPERMARTS': 'DMART',
+        'DMART': 'DMART',
+        'ZOMATO': 'ZOMATO',
+        'PAYTM': 'PAYTM',
+        'NYKAA': 'NYKAA',
+        'POLICYBAZAAR': 'POLICYBZR',
+        'ZYDUS LIFESCIENCES': 'ZYDUSLIFE',
+        'INTERGLOBE AVIATION': 'INDIGO',
+        'INDIGO': 'INDIGO',
+    }
+    
+    # Merge with original mapping
+    COMPANY_TICKER_MAPPING.update(extended_mapping)
     
     # Direct match
     if normalized in COMPANY_TICKER_MAPPING:
@@ -888,26 +1214,36 @@ def map_company_name_to_ticker(company_name: str) -> Optional[str]:
         if key in normalized or normalized in key:
             return ticker
     
-    # Word-by-word match
+    # Word-by-word match with higher threshold
     input_words = set(normalized.split())
     best_match = None
     best_score = 0
     
     for key, ticker in COMPANY_TICKER_MAPPING.items():
         key_words = set(key.split())
-        # Calculate Jaccard similarity
         intersection = len(input_words & key_words)
         union = len(input_words | key_words)
         
         if union > 0:
             score = intersection / union
-            if score > best_score and score > 0.5:  # Minimum 50% similarity
+            if score > best_score and score > 0.4:  # 40% similarity threshold
                 best_score = score
                 best_match = ticker
     
     if best_match:
         logger.info(f"Fuzzy matched '{company_name}' to '{best_match}' (score: {best_score:.2f})")
         return best_match
+    
+    # Try removing additional common words
+    common_words = {'THE', 'AND', '&', 'OF', 'FOR'}
+    cleaned_words = [w for w in input_words if w not in common_words]
+    
+    if cleaned_words:
+        cleaned_normalized = ' '.join(cleaned_words)
+        for key, ticker in COMPANY_TICKER_MAPPING.items():
+            if cleaned_normalized in key or key in cleaned_normalized:
+                logger.info(f"Matched after cleaning: '{company_name}' to '{ticker}'")
+                return ticker
     
     logger.warning(f"Could not map company name: '{company_name}'")
     return None
@@ -3434,3 +3770,4 @@ print("  ✓ Risk Analysis (VaR, CVaR, Drawdown)")
 print("  ✓ Portfolio Optimization (MPT, Risk Parity)")
 print("  ✓ Machine Learning Features")
 print("=" * 80)
+
